@@ -87,7 +87,7 @@ class CardGameEnv(gym.Env):
             else:
                 self._dealer_board[card] = 1
 
-        if self._counter == NUM_CARDS or self._agent_board.sum() == 5:
+        if self._counter == NUM_CARDS or self._agent_board.sum() >= 5:
             terminated = True
 
         reward = 0
