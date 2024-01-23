@@ -1,0 +1,6 @@
+cloudpickle==3.0.0
+Farama-Notifications==0.0.4
+gymnasium==0.29.1
+numpy==1.26.3
+pokerkit==0.4.7
+typing_extensions==4.9.0
