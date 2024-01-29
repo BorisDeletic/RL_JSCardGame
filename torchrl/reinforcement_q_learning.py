@@ -1,67 +1,6 @@
-# -*- coding: utf-8 -*-
-"""
-Reinforcement Learning (DQN) Tutorial
-=====================================
-**Author**: `Adam Paszke <https://github.com/apaszke>`_
-            `Mark Towers <https://github.com/pseudo-rnd-thoughts>`_
-
-
-This tutorial shows how to use PyTorch to train a Deep Q Learning (DQN) agent
-on the CartPole-v1 task from `Gymnasium <https://gymnasium.farama.org>`__.
-
-**Task**
-
-The agent has to decide between two actions - moving the cart left or
-right - so that the pole attached to it stays upright. You can find more
-information about the environment and other more challenging environments at
-`Gymnasium's website <https://gymnasium.farama.org/environments/classic_control/cart_pole/>`__.
-
-.. figure:: /_static/img/cartpole.gif
-   :alt: CartPole
-
-   CartPole
-
-As the agent observes the current state of the environment and chooses
-an action, the environment *transitions* to a new state, and also
-returns a reward that indicates the consequences of the action. In this
-task, rewards are +1 for every incremental timestep and the environment
-terminates if the pole falls over too far or the cart moves more than 2.4
-units away from center. This means better performing scenarios will run
-for longer duration, accumulating larger return.
-
-The CartPole task is designed so that the inputs to the agent are 4 real
-values representing the environment state (position, velocity, etc.).
-We take these 4 inputs without any scaling and pass them through a 
-small fully-connected network with 2 outputs, one for each action. 
-The network is trained to predict the expected value for each action, 
-given the input state. The action with the highest expected value is 
-then chosen.
-
-
-**Packages**
-
-
-First, let's import needed packages. Firstly, we need
-`gymnasium <https://gymnasium.farama.org/>`__ for the environment,
-installed by using `pip`. This is a fork of the original OpenAI
-Gym project and maintained by the same team since Gym v0.19.
-If you are running this in Google Colab, run:
-
-.. code-block:: bash
-
-   %%bash
-   pip3 install gymnasium[classic_control]
-
-We'll also use the following from PyTorch:
-
--  neural networks (``torch.nn``)
--  optimization (``torch.optim``)
--  automatic differentiation (``torch.autograd``)
-
-"""
 
 import gymnasium as gym
-import math
+import numpy as np
 import random
 import matplotlib
 import matplotlib.pyplot as plt
@@ -74,13 +13,14 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
+from tensordict import TensorDict
+from torchrl.data import TensorDictReplayBuffer, LazyMemmapStorage
 
-writer = SummaryWriter('torchrl/runs/cartpole')
-
-PATH = "torchrl/jsgame_model.pt"
+# PATH = "torchrl/jsgame_model.pt"
 
 # env = gym.make("CartPole-v1")
 env = gym.make("JSCardGame-v0")
+env = gym.wrappers.FlattenObservation(env)
 
 # set up matplotlib
 is_ipython = 'inline' in matplotlib.get_backend()
@@ -93,305 +33,228 @@ plt.ion()
 # device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+class Net(nn.Module):
 
-######################################################################
-# Replay Memory
-# -------------
-#
-# We'll be using experience replay memory for training our DQN. It stores
-# the transitions that the agent observes, allowing us to reuse this data
-# later. By sampling from it randomly, the transitions that build up a
-# batch are decorrelated. It has been shown that this greatly stabilizes
-# and improves the DQN training procedure.
-#
-# For this, we're going to need two classes:
-#
-# -  ``Transition`` - a named tuple representing a single transition in
-#    our environment. It essentially maps (state, action) pairs
-#    to their (next_state, reward) result, with the state being the
-#    screen difference image as described later on.
-# -  ``ReplayMemory`` - a cyclic buffer of bounded size that holds the
-#    transitions observed recently. It also implements a ``.sample()``
-#    method for selecting a random batch of transitions for training.
-#
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
 
-Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward'))
+        self.online = self.__build_nn(input_dim, output_dim)
 
+        self.target = self.__build_nn(input_dim, output_dim)
+        self.target.load_state_dict(self.online.state_dict())
 
-class ReplayMemory(object):
+        # Q_target parameters are frozen.
+        for p in self.target.parameters():
+            p.requires_grad = False
 
-    def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity)
+    def forward(self, input, model):
+        if model == "online":
+            return self.online(input)
+        elif model == "target":
+            return self.target(input)
 
-    def push(self, *args):
-        """Save a transition"""
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
-
-    def __len__(self):
-        return len(self.memory)
+    def __build_nn(self, input_dim, output_dim):
+        return nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_dim),
+        )
 
 
 
-class DQN(nn.Module):
+class Agent:
+    def __init__(self, env, state_dim, action_dim, save_dir):
+        self.env = env
 
-    def __init__(self, n_observations, n_actions):
-        super(DQN, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 128)
-        self.layer2 = nn.Linear(128, 128)
-        self.layer3 = nn.Linear(128, n_actions)
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.save_dir = save_dir
 
-    # Called with either one element to determine next action, or a batch
-    # during optimization. Returns tensor([[left0exp,right0exp]...]).
-    def forward(self, x):
-        x = F.relu(self.layer1(x))
-        x = F.relu(self.layer2(x))
-        return self.layer3(x)
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        self.memory = TensorDictReplayBuffer(storage=LazyMemmapStorage(100000, device=torch.device("cpu")))
+        self.batch_size = 32
+
+        # Mario's DNN to predict the most optimal action - we implement this in the Learn section
+        self.net = Net(self.state_dim, self.action_dim).float()
+        self.net = self.net.to(device=self.device)
+
+        self.exploration_rate = 1
+        self.exploration_rate_decay = 0.99975
+        self.exploration_rate_min = 0.1
+        self.gamma = 0.9
+
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=0.00025)
+        self.loss_fn = torch.nn.SmoothL1Loss()
+
+        self.sync_every = 100  # no. of experiences between Q_target & Q_online sync
+        self.curr_step = 0
+
+        self.save_every = 1e4  # no. of experiences between saving
+
+    def act(self, state):
+        """Given a state, choose an epsilon-greedy action"""
+        # EXPLORE
+        if np.random.rand() < self.exploration_rate:
+            action = torch.tensor(self.env.action_space.sample(), device=self.device, dtype=torch.long)
+
+        # EXPLOIT
+        else:
+            state = state[0].__array__() if isinstance(state, tuple) else state.__array__()
+            state = torch.tensor(state, device=self.device, dtype=torch.float32).unsqueeze(0)
+            action_values = self.net(state, model="online")
+            # print(action_values)
+            action = action_values
+
+        # decrease exploration_rate
+        self.exploration_rate *= self.exploration_rate_decay
+        self.exploration_rate = max(self.exploration_rate_min, self.exploration_rate)
+
+        # increment step
+        self.curr_step += 1
+        return action
+
+    def cache(self, state, next_state, action, reward, done):
+        """Add the experience to memory"""
+        def first_if_tuple(x):
+            return x[0] if isinstance(x, tuple) else x
+        state = first_if_tuple(state).__array__()
+        next_state = first_if_tuple(next_state).__array__()
+
+        state = torch.tensor(state, dtype=torch.float32)
+        next_state = torch.tensor(next_state, dtype=torch.float32)
+        action = torch.tensor(action)
+        reward = torch.tensor(reward)
+        done = torch.tensor(done)
+
+        # self.memory.append((state, next_state, action, reward, done,))
+        self.memory.add(TensorDict({"state": state, "next_state": next_state, "action": action, "reward": reward, "done": done}, batch_size=[]))
+
+    def recall(self):
+        """Sample experiences from memory"""
+        batch = self.memory.sample(self.batch_size).to(self.device)
+        state, next_state, action, reward, done = (batch.get(key) for key in ("state", "next_state", "action", "reward", "done"))
+        return state, next_state, action.squeeze(), reward.squeeze(), done.squeeze()
+
+    def learn(self):
+        """Update online action value (Q) function with a batch of experiences"""
+        if self.curr_step % self.sync_every == 0:
+            self.sync_Q_target()
+
+        if self.curr_step % self.save_every == 0:
+            self.save()
+
+        # Sample from memory
+        state, next_state, action, reward, done = self.recall()
+
+        print(state)
+        print(action)
+        # Get TD Estimate
+        td_est = self.td_estimate(state, action)
+
+        # Get TD Target
+        td_tgt = self.td_target(reward, next_state, done)
+
+        # Backpropagate loss through Q_online
+        loss = self.update_Q_online(td_est, td_tgt)
+
+        return (td_est.mean().item(), loss)
+
+    def td_estimate(self, state, action):
+        print(state.shape)
+        print(action.shape)
+        current_Q = self.net(state, model="online")  # Q_online(s,a)
+        print(current_Q.shape)
+        return current_Q
+
+    @torch.no_grad()
+    def td_target(self, reward, next_state, done):
+        next_state_Q = self.net(next_state, model="online")
+        best_action = torch.argmax(next_state_Q, axis=1)
+        next_Q = self.net(next_state, model="target")
+        return (reward + (1 - done.float()) * self.gamma * next_Q).float()
+
+    def update_Q_online(self, td_estimate, td_target):
+        loss = self.loss_fn(td_estimate, td_target)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        return loss.item()
+
+    def sync_Q_target(self):
+        self.net.target.load_state_dict(self.net.online.state_dict())
+
+    def save(self):
+        save_path = (
+            self.save_dir / f"jsgame_net_{int(self.curr_step // self.save_every)}.chkpt"
+        )
+        torch.save(
+            dict(model=self.net.state_dict(), exploration_rate=self.exploration_rate),
+            save_path,
+        )
+        print(f"JsGameNet saved to {save_path} at step {self.curr_step}")
 
 
-# BATCH_SIZE is the number of transitions sampled from the replay buffer
-# GAMMA is the discount factor as mentioned in the previous section
-# EPS_START is the starting value of epsilon
-# EPS_END is the final value of epsilon
-# EPS_DECAY controls the rate of exponential decay of epsilon, higher means a slower decay
-# TAU is the update rate of the target network
-# LR is the learning rate of the ``AdamW`` optimizer
-BATCH_SIZE = 128
-GAMMA = 0.99
-EPS_START = 0.9
-EPS_END = 0.05
-EPS_DECAY = 1000
-TAU = 0.005
-LR = 1e-4
+class Logger():
+    def __init__(self, save_dir):
+        self.save_dir = save_dir
+        self.writer = SummaryWriter(self.save_dir)
 
-# Get number of actions from gym action space
-n_actions = env.action_space.n
-print(n_actions)
+        self.episode_num = 0
+
+    def log_episode(self, i_episode, reward):
+        self.writer.add_scalar('reward',
+                          reward,
+                          i_episode)
+
+        self.episode_num = i_episode
+
+
+log_path = 'torchrl/runs/jscardgame'
+checkpoint_dir = 'torchrl/checkpoints'
+
 # Get the number of state observations
 state, info = env.reset()
 n_observations = len(state)
-print(state)
 
-policy_net = DQN(n_observations, n_actions).to(device)
-target_net = DQN(n_observations, n_actions).to(device)
+num_episodes = 1000
+log_freq = 100
 
-# policy_net.load_state_dict(torch.load(PATH))
-# policy_net.eval()
+agent = Agent(env, state_dim=len(state), action_dim=env.action_space.n, save_dir=checkpoint_dir)
 
-target_net.load_state_dict(policy_net.state_dict())
+logger = Logger(log_path)
 
-optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
-memory = ReplayMemory(10000)
+for e in range(num_episodes):
 
-steps_done = 0
+    state = env.reset()
+    # Play the game!
+    while True:
 
-def select_action(state):
-    global steps_done
-    sample = random.random()
-    eps_threshold = EPS_END + (EPS_START - EPS_END) * \
-        math.exp(-1. * steps_done / EPS_DECAY)
-    steps_done += 1
-    if sample > eps_threshold:
-        with torch.no_grad():
-            # t.max(1) will return the largest column value of each row.
-            # second column on max result is index of where max element was
-            # found, so we pick action with the larger expected reward.
-            return policy_net(state).max(1).indices.view(1, 1)
-    else:
-        return torch.tensor([[env.action_space.sample()]], device=device, dtype=torch.long)
+        # Run agent on the state
+        action = agent.act(state)
+        # print(action)
+        # Agent performs action
+        next_state, reward, terminated, trunc, info = env.step(action)
+        done = terminated or trunc
 
+        # Remember
+        agent.cache(state, next_state, action, reward, done)
 
-episode_durations = []
+        # Learn
+        q, loss = agent.learn()
 
-def log_profiler():
-
-
-def plot_durations(show_result=False):
-    plt.figure(1)
-    durations_t = torch.tensor(episode_durations, dtype=torch.float)
-    if show_result:
-        plt.title('Result')
-    else:
-        plt.clf()
-        plt.title('Training...')
-    plt.xlabel('Episode')
-    plt.ylabel('Duration')
-
-
-    plt.plot(durations_t.numpy())
-    # Take 100 episode averages and plot them too
-    if len(durations_t) >= 100:
-        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
-        means = torch.cat((torch.zeros(99), means))
-        plt.plot(means.numpy())
-
-    plt.pause(0.001)  # pause a bit so that plots are updated
-    if is_ipython:
-        if not show_result:
-            display.display(plt.gcf())
-            display.clear_output(wait=True)
-        else:
-            display.display(plt.gcf())
-
-
-
-def optimize_model():
-    if len(memory) < BATCH_SIZE:
-        return
-    transitions = memory.sample(BATCH_SIZE)
-    # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
-    # detailed explanation). This converts batch-array of Transitions
-    # to Transition of batch-arrays.
-    batch = Transition(*zip(*transitions))
-
-    # Compute a mask of non-final states and concatenate the batch elements
-    # (a final state would've been the one after which simulation ended)
-    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
-                                          batch.next_state)), device=device, dtype=torch.bool)
-    non_final_next_states = torch.cat([s for s in batch.next_state
-                                                if s is not None])
-    state_batch = torch.cat(batch.state)
-    action_batch = torch.cat(batch.action)
-    reward_batch = torch.cat(batch.reward)
-
-    # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
-    # columns of actions taken. These are the actions which would've been taken
-    # for each batch state according to policy_net
-    state_action_values = policy_net(state_batch).gather(1, action_batch)
-
-    # Compute V(s_{t+1}) for all next states.
-    # Expected values of actions for non_final_next_states are computed based
-    # on the "older" target_net; selecting their best reward with max(1).values
-    # This is merged based on the mask, such that we'll have either the expected
-    # state value or 0 in case the state was final.
-    next_state_values = torch.zeros(BATCH_SIZE, device=device)
-    with torch.no_grad():
-        next_state_values[non_final_mask] = target_net(non_final_next_states).max(1).values
-    # Compute the expected Q values
-    expected_state_action_values = (next_state_values * GAMMA) + reward_batch
-
-    # Compute Huber loss
-    criterion = nn.SmoothL1Loss()
-    loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
-
-    # Optimize the model
-    optimizer.zero_grad()
-    loss.backward()
-    # In-place gradient clipping
-    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
-    optimizer.step()
-
-
-######################################################################
-#
-# Below, you can find the main training loop. At the beginning we reset
-# the environment and obtain the initial ``state`` Tensor. Then, we sample
-# an action, execute it, observe the next state and the reward (always
-# 1), and optimize our model once. When the episode ends (our model
-# fails), we restart the loop.
-#
-# Below, `num_episodes` is set to 600 if a GPU is available, otherwise 50 
-# episodes are scheduled so training does not take too long. However, 50 
-# episodes is insufficient for to observe good performance on CartPole.
-# You should see the model constantly achieve 500 steps within 600 training 
-# episodes. Training RL agents can be a noisy process, so restarting training
-# can produce better results if convergence is not observed.
-#
-
-def train():
-    # Initialize the environment and get it's state
-    state, info = env.reset()
-    state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-    for t in count():
-        action = select_action(state)
-        observation, reward, terminated, truncated, _ = env.step(action.item())
-        reward = torch.tensor([reward], device=device)
-        done = terminated or truncated
-
-        if terminated:
-            next_state = None
-        else:
-            next_state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-
-        # Store the transition in memory
-        memory.push(state, action, next_state, reward)
-
-        # Move to the next state
+        # Update state
         state = next_state
 
-        # Perform one step of the optimization (on the policy network)
-        optimize_model()
-
-        # Soft update of the target network's weights
-        # θ′ ← τ θ + (1 −τ )θ′
-        target_net_state_dict = target_net.state_dict()
-        policy_net_state_dict = policy_net.state_dict()
-        for key in policy_net_state_dict:
-            target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
-        target_net.load_state_dict(target_net_state_dict)
-
+        # Check if end of game
         if done:
-            episode_durations.append(t + 1)
-            plot_durations()
-            return
+            break
 
-
-if torch.cuda.is_available():
-    num_episodes = 600
-else:
-    num_episodes = 1000
-
-
-for i_episode in range(num_episodes):
-    train()
-
-    if i_episode % 100 == 0:
-        log_profiler()
-
-print('Complete')
-torch.save(policy_net.state_dict(), PATH)
-plot_durations(show_result=True)
-plt.ioff()
-plt.show()
-
-######################################################################
-# Here is the diagram that illustrates the overall resulting data flow.
-#
-# .. figure:: /_static/img/reinforcement_learning_diagram.jpg
-#
-# Actions are chosen either randomly or based on a policy, getting the next
-# step sample from the gym environment. We record the results in the
-# replay memory and also run optimization step on every iteration.
-# Optimization picks a random batch from the replay memory to do training of the
-# new policy. The "older" target_net is also used in optimization to compute the
-# expected Q values. A soft update of its weights are performed at every step.
-
-
-def play_model():
-    n_showcase_episodes = 3
-
-    for episode in range(n_showcase_episodes):
-        print(f"starting episode {episode}...")
-
-        env = gym.make("CartPole-v1", render_mode="human", max_episode_steps=500)
-
-        # get an initial state
-        state, info = env.reset()
-        state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-
-        # play one episode
-        done = False
-        while not done:
-            action = select_action(state)
-            observation, reward, terminated, truncated, _ = env.step(action.item())
-            state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-
-            reward = torch.tensor([reward], device=device)
-            done = terminated or truncated
-
-    env.close()
-
-# play_model()
+    if (e % log_freq == 0) or (e == num_episodes - 1):
+        logger.log_episode(e, reward)

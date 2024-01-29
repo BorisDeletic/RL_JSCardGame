@@ -1,19 +1,17 @@
 import gymnasium as gym
 from gymnasium.wrappers import FlattenObservation
 import cardenv
+import numpy as np
 
 env = gym.make('JSCardGame-v0', render_mode='ansi')
 observation, info = env.reset()
 
 for _ in range(5):
-    action = env.action_space.sample()  # agent policy that uses the observation and info
+    # action = env.action_space.sample()  # agent policy that uses the observation and info
+    action = np.zeros(52)  # agent policy that uses the observation and info
     observation, reward, terminated, truncated, info = env.step(action)
-    env.render()
-
-    print(observation)
-    print("REWARD: ", reward)
-    print("TERMINATED: ", terminated)
-    print()
+    state = env.render()
+    print(state)
 
     if terminated or truncated:
         observation, info = env.reset()

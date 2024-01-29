@@ -6,3 +6,6 @@ pokerkit==0.4.7
 typing_extensions==4.9.0
 torch~=2.1.2
 matplotlib~=3.8.2
+tensordict~=0.2.1
+torchrl~=0.2.1
+ipython~=8.20.0

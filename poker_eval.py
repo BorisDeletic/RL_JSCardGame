@@ -29,6 +29,8 @@ c5 = pokerkit.utilities.Deck.STANDARD[14]
 c6 = pokerkit.utilities.Deck.STANDARD[15]
 print(type(pokerkit.utilities.Deck.STANDARD))
 
-hand = StandardHighHand.from_game([c1, c2, c3, c4, c5, c6])
+board = [c1, c2, c3, c4, c5, c6]
+hand = StandardHighHand.from_game(board)
 
 print(hand)
+print(board)

@@ -106,9 +106,25 @@ class CardGameEnv(gym.Env):
 
     def render(self):
         if self.render_mode == "ansi":
+            agent_cards = [pokerkit.Deck.STANDARD[c] for c in np.flatnonzero(self._agent_board)]
+            dealer_cards = [pokerkit.Deck.STANDARD[c] for c in np.flatnonzero(self._dealer_board)]
+
+            # h_agent = pokerkit.StandardHighHand.from_game(agent_cards)
+            # h_dealer = pokerkit.StandardHighHand.from_game(dealer_cards)
+
             state = "AGENT: {}\nDEALER: {}\n".format(
-                np.array2string(self._agent_board),
-                np.array2string(self._dealer_board)
+                agent_cards,
+                dealer_cards
             )
+
+            if len(agent_cards) >= 5:
+                h_agent = pokerkit.StandardHighHand.from_game(agent_cards)
+                h_dealer = pokerkit.StandardHighHand.from_game(dealer_cards)
+
+                state += "AGENT: {}\nDEALER: {}\nAGENT {}\n".format(
+                    h_agent,
+                    h_dealer,
+                    "WINS" if h_agent > h_dealer else "LOSES"
+                )
 
             return state
