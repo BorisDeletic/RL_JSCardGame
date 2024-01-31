@@ -128,3 +128,10 @@ class CardGameEnv(gym.Env):
                 )
 
             return state
+
+    def print_action(self, action):
+        agent_cards = [pokerkit.Deck.STANDARD[c] for c in np.flatnonzero(action)]
+
+        state = "REQUESTING: {}".format(agent_cards)
+
+        return state

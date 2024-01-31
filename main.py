@@ -4,6 +4,9 @@ import cardenv
 import numpy as np
 
 env = gym.make('JSCardGame-v0', render_mode='ansi')
+env = FlattenObservation(env)
+
+print(env.observation_space)
 observation, info = env.reset()
 
 for _ in range(5):

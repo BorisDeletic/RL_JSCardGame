@@ -1,6 +1,7 @@
 import gymnasium as gym
 import cardenv
 import os
+import torch as th
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.evaluation import evaluate_policy
@@ -24,7 +25,6 @@ def make_env(env_id: str, rank: int, seed: int = 0) -> Callable:
 
     def _init() -> gym.Env:
         env = gym.make(env_id)
-        env = gym.wrappers.FlattenObservation(env)
         env.reset(seed=seed + rank)
         return env
 
@@ -32,8 +32,8 @@ def make_env(env_id: str, rank: int, seed: int = 0) -> Callable:
     return _init
 
 
-checkpoint_dir = "checkpoints/ppo_jscardgame"
-periodic_checkpoint_dir = "./model_checkpoints/"
+checkpoint_dir = "checkpoints/ppo_jscardgame_multi"
+periodic_checkpoint_dir = "./checkpoints/"
 env_id = "JSCardGame-v0"
 
 # env = gym.make(env_id)
@@ -47,10 +47,12 @@ def train():
 
 
     eval_callback = EvalCallback(env, eval_freq=1e5 // num_cpu, n_eval_episodes=1000, log_path="./logs/")
-    checkpoint_callback = CheckpointCallback(save_freq=1e6 // num_cpu, save_path='./model_checkpoints/')
+    checkpoint_callback = CheckpointCallback(save_freq=1e6 // num_cpu, save_path='./checkpoints/')
 
-    # model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./logs/")
-    model = PPO.load('./model_checkpoints/rl_model_10000000_steps', env, tensorboard_log="./logs/", verbose=1) #, device="mps"
+    # policy_kwargs = dict(activation_fn=th.nn.ReLU, net_arch=[128, 128, 128])
+    # model = PPO("MultiInputPolicy", env, verbose=1, tensorboard_log="./logs/", policy_kwargs=policy_kwargs)
+    # model = PPO.load('./checkpoints/rl_model_1000000_steps', env, tensorboard_log="./logs/", verbose=1) #, device="mps"
+    print(model.policy)
     model.learn(total_timesteps=1e7, callback=[eval_callback, checkpoint_callback])
 
     vec_env = model.get_env()
@@ -63,7 +65,7 @@ def train():
         # if done:
         #   obs = env.reset()
 
-    # model.save(checkpoint_dir)
+    model.save(checkpoint_dir)
     # stats_path = os.path.join(log_dir, "vec_normalize.pkl")
     # env.save(stats_path)
     env.close()
@@ -77,7 +79,7 @@ def load_model():
     env = gym.make(env_id, render_mode='ansi')
     env = gym.wrappers.FlattenObservation(env)
 
-    model = PPO.load('./model_checkpoints/rl_model_10000000_steps', env) #, device="mps"
+    model = PPO.load('./rl_model_10000000_steps', env) #, device="mps"
     mean_reward, std_reward = evaluate_policy(model, env)
 
     print(f"Mean reward = {mean_reward:.2f} +/- {std_reward:.2f}")
