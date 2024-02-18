@@ -1,6 +1,5 @@
 import gymnasium as gym
 from gymnasium.wrappers import FlattenObservation
-import cardenv
 import numpy as np
 
 env = gym.make('JSCardGame-v0', render_mode='ansi')

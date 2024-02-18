@@ -1,17 +1,11 @@
 
 import gymnasium as gym
 import numpy as np
-import random
 import matplotlib
 import matplotlib.pyplot as plt
-from collections import namedtuple, deque
-from itertools import count
-import cardenv
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tensordict import TensorDict
 from torchrl.data import TensorDictReplayBuffer, LazyMemmapStorage
@@ -25,7 +19,7 @@ env = gym.wrappers.FlattenObservation(env)
 # set up matplotlib
 is_ipython = 'inline' in matplotlib.get_backend()
 if is_ipython:
-    from IPython import display
+    pass
 
 plt.ion()
 
